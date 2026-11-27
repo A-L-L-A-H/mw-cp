@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -183,6 +182,7 @@ type PaasDeployRequest struct {
 	Volumes      []string          `json:"volumes,omitempty"`
 	MemoryLimit  string            `json:"memoryLimit,omitempty"`
 	CPULimit     string            `json:"cpuLimit,omitempty"`
+	PIDsLimit    int               `json:"pidsLimit,omitempty"`
 	ComposeSpec  string            `json:"composeSpec,omitempty"`
 	GitRepo      string            `json:"gitRepo,omitempty"`
 }
@@ -514,6 +514,9 @@ func ValidateDeployRequest(req PaasDeployRequest) error {
 		if err != nil || cpus <= 0 || cpus > 64 {
 			return fmt.Errorf("invalid cpuLimit range: %q", req.CPULimit)
 		}
+	}
+	if req.PIDsLimit < 0 || req.PIDsLimit > maxPaasPIDsLimit {
+		return fmt.Errorf("invalid pidsLimit: %d (must be 1..%d)", req.PIDsLimit, maxPaasPIDsLimit)
 	}
 	for k, v := range req.Env {
 		if !paasEnvKeyPattern.MatchString(k) {
@@ -866,37 +869,8 @@ func (m *PaasManager) deployContainerZeroDowntime(ctx context.Context, req PaasD
 }
 
 func (m *PaasManager) buildDockerRunArgs(req PaasDeployRequest, containerName string) []string {
-	args := []string{
-		"run", "-d",
-		"--name", containerName,
-		"--restart", "unless-stopped",
-		"--label", "mw.paas.app=" + req.Slug,
-		"--label", "mw.paas.tenant=" + req.TenantID,
-		"--label", "mw.paas.managed=true",
-	}
-	if m.dockerNetwork != "" {
-		args = append(args, "--network", m.dockerNetwork)
-	}
-	for _, vol := range req.Volumes {
-		args = append(args, "-v", vol)
-	}
-	if req.MemoryLimit != "" {
-		args = append(args, "--memory", req.MemoryLimit)
-	}
-	if req.CPULimit != "" {
-		args = append(args, "--cpus", req.CPULimit)
-	}
-	// Deterministic env flag ordering.
-	keys := make([]string, 0, len(req.Env))
-	for k := range req.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		args = append(args, "-e", k+"="+req.Env[k])
-	}
-	args = append(args, req.Image)
-	return args
+	spec := BuildPaasContainerSpec(req, containerName, m.dockerNetwork)
+	return spec.DockerRunArgs()
 }
 
 func (m *PaasManager) handleAppSubroutes() http.HandlerFunc {

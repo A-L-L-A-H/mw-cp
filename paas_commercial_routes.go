@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,6 +10,19 @@ import (
 	"sync"
 	"time"
 )
+
+// appliedQuotaRecord stores an enforced tenant quota and container security profile.
+type appliedQuotaRecord struct {
+	Tenant      string    `json:"tenant"`
+	Plan        string    `json:"plan"`
+	MemoryMB    int       `json:"memory_mb"`
+	VCPUMilli   int       `json:"vcpu_milli"`
+	DiskGB      int       `json:"disk_gb"`
+	PIDsLimit   int       `json:"pids_limit"`
+	CapDrop     []string  `json:"cap_drop"`
+	SecurityOpt []string  `json:"security_opt"`
+	AppliedAt   time.Time `json:"applied_at"`
+}
 
 // paasCommercialHandler wires commercial PaaS endpoints (T30/T31/T32/T33).
 type paasCommercialHandler struct {
@@ -18,11 +32,13 @@ type paasCommercialHandler struct {
 	domains       *customDomainRegistry
 	autosleep     *autosleepManager
 
-	ledgerMu    sync.RWMutex
-	ledger      map[string]meteringUsage
-	snapshotsMu sync.RWMutex
-	snapshots   map[string][]snapshotPlan
-	nowFn       func() time.Time
+	ledgerMu      sync.RWMutex
+	ledger        map[string]meteringUsage
+	snapshotsMu   sync.RWMutex
+	snapshots     map[string][]snapshotPlan
+	quotasMu      sync.RWMutex
+	appliedQuotas map[string]appliedQuotaRecord
+	nowFn         func() time.Time
 }
 
 func newPaasCommercialHandler(templatesRoot, outputBaseDir string, driver DockerDriver, domains *customDomainRegistry) *paasCommercialHandler {
@@ -46,6 +62,7 @@ func newPaasCommercialHandler(templatesRoot, outputBaseDir string, driver Docker
 		autosleep:     newAutosleepManager(15 * time.Minute),
 		ledger:        make(map[string]meteringUsage),
 		snapshots:     make(map[string][]snapshotPlan),
+		appliedQuotas: make(map[string]appliedQuotaRecord),
 		nowFn:         time.Now,
 	}
 }
@@ -140,6 +157,110 @@ func (h *paasCommercialHandler) handleTemplateDeploy() http.HandlerFunc {
 	}
 }
 
+type paasQuotaApplyRequest struct {
+	Tenant    string `json:"tenant"`
+	TenantID  string `json:"tenant_id,omitempty"`
+	Plan      string `json:"plan"`
+	MemoryMB  int    `json:"memory_mb"`
+	VCPUMilli int    `json:"vcpu_milli"`
+	DiskGB    int    `json:"disk_gb"`
+	PIDsLimit int    `json:"pids_limit,omitempty"`
+}
+
+// handleApplyQuotas handles POST /paas/quotas/apply, enforcing paid plan CPU/RAM/disk limits fail-closed.
+func (h *paasCommercialHandler) handleApplyQuotas() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writePaasJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		var req paasQuotaApplyRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+			writePaasJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+			return
+		}
+
+		if req.Tenant == "" {
+			req.Tenant = strings.TrimSpace(req.TenantID)
+		}
+		if claims, ok := ridTenantClaimsFromContext(r.Context()); ok {
+			if req.Tenant != "" && req.Tenant != claims.TenantID {
+				writePaasJSON(w, http.StatusForbidden, map[string]string{"error": "tenant mismatch"})
+				return
+			}
+			req.Tenant = claims.TenantID
+			if req.Plan == "" {
+				req.Plan = claims.PlanTier
+			} else if req.Plan != claims.PlanTier {
+				writePaasJSON(w, http.StatusForbidden, map[string]string{"error": "plan mismatch"})
+				return
+			}
+		}
+
+		if !templateSlugPattern.MatchString(req.Tenant) {
+			writePaasJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tenant"})
+			return
+		}
+		req.Plan = strings.TrimSpace(req.Plan)
+		if _, known := paasPlanQuotas[req.Plan]; !known {
+			writePaasJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown or unpaid plan"})
+			return
+		}
+		if req.MemoryMB <= 0 || req.VCPUMilli <= 0 || req.DiskGB <= 0 {
+			writePaasJSON(w, http.StatusBadRequest, map[string]string{"error": "memory_mb, vcpu_milli, and disk_gb must be positive"})
+			return
+		}
+		if req.PIDsLimit < 0 || req.PIDsLimit > maxPaasPIDsLimit {
+			writePaasJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pids_limit"})
+			return
+		}
+		pidsLimit := req.PIDsLimit
+		if pidsLimit == 0 {
+			pidsLimit = defaultPaasPIDsLimit
+		}
+
+		requested := paasPlanQuota{
+			MemoryMB:  req.MemoryMB,
+			VCPUMilli: req.VCPUMilli,
+			DiskGB:    req.DiskGB,
+		}
+		if err := paasQuotaEnforce(req.Plan, requested); err != nil {
+			writePaasJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			return
+		}
+
+		record := appliedQuotaRecord{
+			Tenant:      req.Tenant,
+			Plan:        req.Plan,
+			MemoryMB:    requested.MemoryMB,
+			VCPUMilli:   requested.VCPUMilli,
+			DiskGB:      requested.DiskGB,
+			PIDsLimit:   pidsLimit,
+			CapDrop:     []string{"ALL"},
+			SecurityOpt: []string{"no-new-privileges:true"},
+			AppliedAt:   h.nowFn().UTC(),
+		}
+
+		h.quotasMu.Lock()
+		h.appliedQuotas[req.Tenant] = record
+		h.quotasMu.Unlock()
+
+		writePaasJSON(w, http.StatusOK, map[string]any{
+			"status":       "applied",
+			"tenant":       record.Tenant,
+			"plan":         record.Plan,
+			"memory_mb":    record.MemoryMB,
+			"vcpu_milli":   record.VCPUMilli,
+			"disk_gb":      record.DiskGB,
+			"pids_limit":   record.PIDsLimit,
+			"cap_drop":     record.CapDrop,
+			"security_opt": record.SecurityOpt,
+			"applied_at":   record.AppliedAt.Format(time.RFC3339),
+		})
+	}
+}
+
 // handleTenantQuotas handles GET /paas/quotas/:tenant.
 func (h *paasCommercialHandler) handleTenantQuotas() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +282,23 @@ func (h *paasCommercialHandler) handleTenantQuotas() http.HandlerFunc {
 			}
 		}
 		if plan == "" {
+			h.quotasMu.RLock()
+			applied, hasApplied := h.appliedQuotas[tenant]
+			h.quotasMu.RUnlock()
+			if hasApplied {
+				writePaasJSON(w, http.StatusOK, map[string]any{
+					"tenant":       applied.Tenant,
+					"plan":         applied.Plan,
+					"memory_mb":    applied.MemoryMB,
+					"vcpu_milli":   applied.VCPUMilli,
+					"disk_gb":      applied.DiskGB,
+					"pids_limit":   applied.PIDsLimit,
+					"cap_drop":     applied.CapDrop,
+					"security_opt": applied.SecurityOpt,
+					"applied_at":   applied.AppliedAt.Format(time.RFC3339),
+				})
+				return
+			}
 			plan = "starter"
 		}
 

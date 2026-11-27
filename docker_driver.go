@@ -11,6 +11,165 @@ import (
 	"sync"
 )
 
+const (
+	defaultPaasMemoryLimit = "256m"
+	defaultPaasPIDsLimit   = 256
+	maxPaasPIDsLimit       = 4096
+)
+
+// PaasContainerSpec is the hardened launch specification for a PaaS container.
+type PaasContainerSpec struct {
+	ContainerName string   `json:"container_name"`
+	Image         string   `json:"image"`
+	Restart       string   `json:"restart"`
+	Network       string   `json:"network,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	Volumes       []string `json:"volumes,omitempty"`
+	Env           []string `json:"env,omitempty"`
+	CapDrop       []string `json:"cap_drop"`
+	SecurityOpt   []string `json:"security_opt"`
+	MemoryLimit   string   `json:"memory_limit"`
+	MemorySwap    string   `json:"memory_swap"`
+	CPULimit      string   `json:"cpu_limit,omitempty"`
+	PIDsLimit     int      `json:"pids_limit"`
+}
+
+// BuildPaasContainerSpec constructs a hardened PaaS container launch spec enforcing
+// cap-drop=ALL, no-new-privileges, and PID/RAM hard limits fail-closed.
+func BuildPaasContainerSpec(req PaasDeployRequest, containerName, dockerNetwork string) PaasContainerSpec {
+	memLimit := strings.TrimSpace(req.MemoryLimit)
+	if memLimit == "" {
+		memLimit = defaultPaasMemoryLimit
+	}
+	pidsLimit := req.PIDsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = defaultPaasPIDsLimit
+	} else if pidsLimit > maxPaasPIDsLimit {
+		pidsLimit = maxPaasPIDsLimit
+	}
+
+	envEntries := make([]string, 0, len(req.Env))
+	if len(req.Env) > 0 {
+		keys := make([]string, 0, len(req.Env))
+		for k := range req.Env {
+			keys = append(keys, k)
+		}
+		// Keep deterministic order matching sort.Strings in paas.go.
+		for i := 0; i < len(keys); i++ {
+			for j := i + 1; j < len(keys); j++ {
+				if keys[j] < keys[i] {
+					keys[i], keys[j] = keys[j], keys[i]
+				}
+			}
+		}
+		for _, k := range keys {
+			envEntries = append(envEntries, k+"="+req.Env[k])
+		}
+	}
+
+	return PaasContainerSpec{
+		ContainerName: containerName,
+		Image:         req.Image,
+		Restart:       "unless-stopped",
+		Network:       strings.TrimSpace(dockerNetwork),
+		Labels: []string{
+			"mw.paas.app=" + req.Slug,
+			"mw.paas.tenant=" + req.TenantID,
+			"mw.paas.managed=true",
+		},
+		Volumes:     append([]string(nil), req.Volumes...),
+		Env:         envEntries,
+		CapDrop:     []string{"ALL"},
+		SecurityOpt: []string{"no-new-privileges:true"},
+		MemoryLimit: memLimit,
+		MemorySwap:  memLimit,
+		CPULimit:    strings.TrimSpace(req.CPULimit),
+		PIDsLimit:   pidsLimit,
+	}
+}
+
+// BuildQuotaContainerSpec validates paid plan quota ceilings and builds a hardened PaaS container spec.
+func BuildQuotaContainerSpec(tenant, plan, slug, image string, quota paasPlanQuota, pidsLimit int) (PaasContainerSpec, error) {
+	if err := paasQuotaEnforce(plan, quota); err != nil {
+		return PaasContainerSpec{}, err
+	}
+	req := PaasDeployRequest{
+		Slug:        slug,
+		TenantID:    tenant,
+		Image:       image,
+		MemoryLimit: fmt.Sprintf("%dm", quota.MemoryMB),
+		CPULimit:    fmt.Sprintf("%.2f", float64(quota.VCPUMilli)/1000.0),
+		PIDsLimit:   pidsLimit,
+	}
+	netName, _ := templateTenantNetwork(slug)
+	return BuildPaasContainerSpec(req, PaasContainerName(slug), netName), nil
+}
+
+// DockerRunArgs renders hardened `docker run` CLI arguments from the container spec.
+func (s PaasContainerSpec) DockerRunArgs() []string {
+	restart := s.Restart
+	if restart == "" {
+		restart = "unless-stopped"
+	}
+	memLimit := strings.TrimSpace(s.MemoryLimit)
+	if memLimit == "" {
+		memLimit = defaultPaasMemoryLimit
+	}
+	memSwap := strings.TrimSpace(s.MemorySwap)
+	if memSwap == "" {
+		memSwap = memLimit
+	}
+	pidsLimit := s.PIDsLimit
+	if pidsLimit <= 0 {
+		pidsLimit = defaultPaasPIDsLimit
+	}
+
+	args := []string{
+		"run", "-d",
+		"--name", s.ContainerName,
+		"--restart", restart,
+	}
+
+	capDrop := s.CapDrop
+	if len(capDrop) == 0 {
+		capDrop = []string{"ALL"}
+	}
+	for _, capName := range capDrop {
+		args = append(args, "--cap-drop="+capName)
+	}
+
+	secOpts := s.SecurityOpt
+	if len(secOpts) == 0 {
+		secOpts = []string{"no-new-privileges:true"}
+	}
+	for _, opt := range secOpts {
+		args = append(args, "--security-opt="+opt)
+	}
+
+	args = append(args,
+		"--pids-limit="+strconv.Itoa(pidsLimit),
+		"--memory", memLimit,
+		"--memory-swap", memSwap,
+	)
+	if s.CPULimit != "" {
+		args = append(args, "--cpus", s.CPULimit)
+	}
+	for _, lbl := range s.Labels {
+		args = append(args, "--label", lbl)
+	}
+	if s.Network != "" {
+		args = append(args, "--network", s.Network)
+	}
+	for _, vol := range s.Volumes {
+		args = append(args, "-v", vol)
+	}
+	for _, envKV := range s.Env {
+		args = append(args, "-e", envKV)
+	}
+	args = append(args, s.Image)
+	return args
+}
+
 // DockerDriver abstracts container lifecycle operations for PaaS workloads.
 type DockerDriver interface {
 	DeployCompose(ctx context.Context, project, composePath string) error
