@@ -984,6 +984,18 @@ func (m *PaasManager) handleAppSubroutes() http.HandlerFunc {
 				return
 			}
 			m.handleAppRedeploy(w, r, slug)
+		case "snapshots":
+			if r.Method != http.MethodPost {
+				writePaasJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+				return
+			}
+			newPaasCommercialHandler("", "", nil, nil).handleAppSnapshot(w, r, slug)
+		case "restore":
+			if r.Method != http.MethodPost {
+				writePaasJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+				return
+			}
+			newPaasCommercialHandler("", "", nil, nil).handleAppRestore(w, r, slug)
 		case "env":
 			if r.Method != http.MethodPut && r.Method != http.MethodPatch {
 				writePaasJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})

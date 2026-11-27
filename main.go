@@ -88,6 +88,10 @@ var controlPlaneRouteMatrix = []controlPlaneRoute{
 	{pattern: "/paas/system/update", family: "paas-ops", access: accessAuthenticated, methods: []string{http.MethodGet}},
 	{pattern: "/paas/system/update/apply", family: "paas-ops", access: accessPrivileged, methods: []string{http.MethodPost}},
 	{pattern: "/paas/templates", family: "paas-coolify", access: accessAuthenticated, methods: []string{http.MethodGet}},
+	{pattern: "/paas/templates/deploy", family: "paas-commercial", access: accessPrivileged, methods: []string{http.MethodPost}},
+	{pattern: "/paas/quotas/", family: "paas-commercial", access: accessAuthenticated, methods: []string{http.MethodGet}},
+	{pattern: "/paas/usage/", family: "paas-commercial", access: accessAuthenticated, methods: []string{http.MethodGet}},
+	{pattern: "/paas/caddy/ask", family: "paas-commercial", access: accessAuthenticated, methods: []string{http.MethodGet}},
 	{pattern: "/paas/apps", family: "paas-apps", access: accessAuthenticated},
 	{pattern: "/paas/apps/deploy", family: "paas-apps", access: accessPrivileged, methods: []string{http.MethodPost}},
 	{pattern: "/paas/apps/deploy-compose", family: "paas-coolify", access: accessPrivileged, methods: []string{http.MethodPost}},
@@ -354,6 +358,7 @@ func buildMux(db *sql.DB, dockerBin, adminToken string) http.Handler {
 		ispcontrol.NewSimulatorAdapter(ispcontrol.ResourceProfile, ispcontrol.OperationInspect, ispcontrol.OperationPlan),
 	)
 	ispHandler := ispcontrol.NewHandler(ispRouter, 5*time.Second)
+	commercial := newPaasCommercialHandler("", "", newCLIDockerDriver(dockerBin, os.Getenv("DOCKER_HOST")), nil)
 
 	raw := map[string]http.HandlerFunc{
 		"/health":                   handleHealth(db, dockerBin),
@@ -373,6 +378,10 @@ func buildMux(db *sql.DB, dockerBin, adminToken string) http.Handler {
 		"/paas/system/update":       updater.handleStatus(),
 		"/paas/system/update/apply": updater.handleApply(),
 		"/paas/templates":           paasMgr.handleTemplates(),
+		"/paas/templates/deploy":    commercial.handleTemplateDeploy(),
+		"/paas/quotas/":             commercial.handleTenantQuotas(),
+		"/paas/usage/":              commercial.handleTenantUsage(),
+		"/paas/caddy/ask":           commercial.domains.HandleCaddyAsk(),
 		"/paas/apps":                paasMgr.handleApps(),
 		"/paas/apps/deploy":         paasMgr.handleDeploy(),
 		"/paas/apps/deploy-compose": paasMgr.handleComposeDeploy(),
