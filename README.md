@@ -1,31 +1,35 @@
-# mw-cp — MoonWitness Go PaaS Control Plane
+# mw-cp — Go control plane for MoonWitness PaaS deployment and mesh operations.
 
-Standalone Go control plane for the MoonWitness PaaS, extracted from `mw-xv/apps/control-plane`.
+**Repository:** [`A-L-L-A-H/mw-cp`](https://github.com/A-L-L-A-H/mw-cp) · **Stack:** Go 1.24 · CGO-free SQLite
 
-## Features
+## What it does
 
-- Pure-Go (`CGO_ENABLED=0`) HTTP control plane with embedded SQLite (`modernc.org/sqlite`)
-- PaaS deployment orchestration, Git builder, Caddy routing, Coolify-compatible templates, and self-update
-- Mesh coordination, A2A protocol, stateless agent runtime, and ISP contract/control plane APIs
-- Embedded web UI (`ui/index.html`)
+Provides deployment orchestration, Git builds, Caddy routing, A2A/mesh coordination, ISP controls, and an embedded UI.
 
-## Quick Start
+## Quick start
 
 ```bash
 CGO_ENABLED=0 go build -o control-plane .
 ./control-plane
 ```
 
-## Development & Verification
+## Verify
 
 ```bash
 CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test -count=1 ./...
 ```
 
-## Docker
+## Configuration
+
+- **Port:** 3003
+- **Key configuration:** MW_CONTROL_PLANE_ADDR
 
 ```bash
 docker build -t ghcr.io/a-l-l-a-h/mw-cp:latest .
 docker run --rm -p 3003:3003 ghcr.io/a-l-l-a-h/mw-cp:latest
 ```
+
+## Notes
+
+The control plane port is private by default; expose it only through the mesh or an authenticated edge.
