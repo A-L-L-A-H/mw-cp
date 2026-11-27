@@ -9,6 +9,11 @@ Provides deployment orchestration, Git builds, Caddy routing, A2A/mesh coordinat
 ## Quick start
 
 ```bash
+# Via npm wrappers (recommended)
+npm install
+npm run dev
+
+# Or directly with Go
 CGO_ENABLED=0 go build -o control-plane .
 ./control-plane
 ```
@@ -16,6 +21,7 @@ CGO_ENABLED=0 go build -o control-plane .
 ## Verify
 
 ```bash
+npm run fmt
 CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test -count=1 ./...
 ```
@@ -28,6 +34,7 @@ CGO_ENABLED=0 go test -count=1 ./...
 ```bash
 docker build -t ghcr.io/a-l-l-a-h/mw-cp:latest .
 docker run --rm -p 3003:3003 ghcr.io/a-l-l-a-h/mw-cp:latest
+npm run docker:build
 ```
 
 ## Notes
