@@ -6,7 +6,8 @@
   "scripts": {
     "docker:build": "docker build -t mw-xv-control-plane:latest -f Dockerfile .",
     "dev": "go run .",
-    "fmt": "go fmt ./..."
+    "fmt": "go fmt ./...",
+    "test": "go test ./..."
   },
   "engines": {
     "node": "24.x"
